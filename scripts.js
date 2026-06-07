@@ -1,6 +1,6 @@
 // Device address validation + UI state + Paystack integration
 (function () {
-  const input = document.getElementById('password'); // labeled "Device address" in the UI
+  const input = document.getElementById('password');
   const emailInput = document.getElementById('email');
   const button = document.querySelector('[data-purpose="login-button"]');
   const statusEl = document.getElementById('address-status');
@@ -9,29 +9,44 @@
   const paymentAmountDisplay = document.getElementById('payment-amount-display');
   const form = document.querySelector('form');
 
-  if (!input || !button || !statusEl || !spacingEl) return;
+  let contractDetails = null;
+  let appConfigPromise = null;
 
-  // Get URL parameters
+  if (!input || !emailInput || !button || !statusEl || !spacingEl || !form) return;
+
   const urlParams = new URLSearchParams(window.location.search);
   const contractIdFromUrl = urlParams.get('contractId');
   const deviceFromUrl = urlParams.get('device');
   const emailFromUrl = urlParams.get('email');
 
-  // Pre-fill fields if available from URL
   if (deviceFromUrl) {
     input.value = deviceFromUrl;
   }
+
   if (emailFromUrl) {
     emailInput.value = emailFromUrl;
   }
 
   const isValidDeviceAddress = (value) => {
-    const v = String(value || '').trim();
-    // Trial rule: 0x + 40 hex chars
-    return /^0x[0-9a-fA-F]{40}$/.test(v);
+    const normalized = String(value || '').trim();
+    return /^0x[0-9a-fA-F]{40}$/.test(normalized)
+      || /^[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}$/.test(normalized);
   };
 
-  // Fetch contract details to show payment amount
+  const getAppConfig = async () => {
+    if (!appConfigPromise) {
+      appConfigPromise = fetch('/api/v1/config').then((response) => {
+        if (!response.ok) {
+          throw new Error('Failed to load payment configuration');
+        }
+
+        return response.json();
+      });
+    }
+
+    return appConfigPromise;
+  };
+
   const fetchContractDetails = async (contractId) => {
     try {
       const response = await fetch(`/api/v1/contracts/${contractId}`);
@@ -39,6 +54,7 @@
         console.error('Failed to fetch contract details');
         return null;
       }
+
       return await response.json();
     } catch (error) {
       console.error('Error fetching contract:', error);
@@ -47,19 +63,12 @@
   };
 
   const setState = (valid) => {
-    // enable/disable proceed button
     button.disabled = !valid;
+    statusEl.textContent = valid ? 'Ready to proceed to payment' : 'Enter a valid device address';
 
-    // update status text
-    statusEl.textContent = valid
-      ? 'Ready to proceed to payment'
-      : 'Enter a valid device address';
-
-    // animate spacing between input and button
     if (valid) {
       statusEl.classList.remove('text-gray-500');
       statusEl.classList.add('text-gray-500');
-      spacingEl.style.height = 'auto';
       spacingEl.style.height = '72px';
       spacingEl.style.opacity = '1';
       paymentInfoSection.classList.remove('hidden');
@@ -70,69 +79,22 @@
     }
   };
 
-  const onChange = () => {
-    const valid = isValidDeviceAddress(input.value);
-    setState(valid);
-  };
-
-  input.addEventListener('input', onChange);
-  input.addEventListener('blur', onChange);
-
-  // Handle form submission - initialize Paystack payment
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-
-    const deviceAddress = input.value.trim();
-    const email = emailInput.value.trim();
-
-    if (!isValidDeviceAddress(deviceAddress) || !email) {
-      alert('Please fill in all required fields');
+  const loadPaystack = () => new Promise((resolve, reject) => {
+    if (window.PaystackPop) {
+      resolve();
       return;
     }
 
-    // Load Paystack script if not already loaded
-    if (!window.PaystackPop) {
-      const script = document.createElement('script');
-      script.src = 'https://js.paystack.co/v1/inline.js';
-      script.onload = () => initPaystackPayment(deviceAddress, email, contractIdFromUrl);
-      document.body.appendChild(script);
-    } else {
-      initPaystackPayment(deviceAddress, email, contractIdFromUrl);
-    }
+    const script = document.createElement('script');
+    script.src = 'https://js.paystack.co/v1/inline.js';
+    script.onload = resolve;
+    script.onerror = () => reject(new Error('Failed to load Paystack'));
+    document.body.appendChild(script);
   });
 
-  // Initialize Paystack payment
-  const initPaystackPayment = (deviceAddress, email, contractId) => {
-    // Get payment amount from contract (in frontend, we'll use a default or fetch it)
-    // For now, using a default monthly payment amount
-    const paymentAmount = 50000; // Amount in kobo (₦500.00)
-
-    const handler = PaystackPop.setup({
-      key: 'pk_live_994fe2e9209103bf98de6fcd47ad430b4d9bdda7', // Replace with your Paystack public key from env
-      email: email,
-      amount: paymentAmount,
-      currency: 'GHS',
-      ref: `${contractId}-${Date.now()}`,
-      metadata: {
-        deviceAddress: deviceAddress,
-        contractId: contractId
-      },
-      onClose: () => {
-        alert('Payment window closed.');
-      },
-      onSuccess: (response) => {
-        // Payment successful, show success message
-        showPaymentSuccess(response, deviceAddress, email, contractId);
-      }
-    });
-
-    handler.openIframe();
-  };
-
-  const showPaymentSuccess = (response, deviceAddress, email, contractId) => {
-    // Hide form and show success message
+  const showPaymentSuccess = (response, email) => {
     form.classList.add('hidden');
-    
+
     const successDiv = document.createElement('div');
     successDiv.className = 'space-y-6 text-center';
     successDiv.innerHTML = `
@@ -143,7 +105,7 @@
         <h2 class="text-3xl font-bold text-black mb-2">Payment Successful!</h2>
         <p class="text-gray-600 text-lg">Reference: ${response.reference}</p>
       </div>
-      
+
       <div class="bg-blue-50 border border-blue-200 rounded-xl p-6 text-left">
         <h3 class="font-bold text-gray-800 mb-3">What's next?</h3>
         <ol class="space-y-2 text-sm text-gray-700">
@@ -173,19 +135,83 @@
     formParent.appendChild(successDiv);
   };
 
-  // Initial state
+  const initPaystackPayment = async (deviceAddress, email, contractId) => {
+    const config = await getAppConfig();
+
+    if (!config.paystackPublicKey) {
+      alert('Payment is not configured yet. Please add PAYSTACK_PUBLIC_KEY on the server.');
+      return;
+    }
+
+    const paymentAmount = contractDetails?.payment_amount
+      ? Math.round(Number(contractDetails.payment_amount) * 100)
+      : 50000;
+
+    const handler = PaystackPop.setup({
+      key: config.paystackPublicKey,
+      email,
+      amount: paymentAmount,
+      currency: config.paymentCurrency || 'GHS',
+      ref: `${contractId || 'payment'}-${Date.now()}`,
+      metadata: {
+        contract_id: contractId,
+        device_address: deviceAddress
+      },
+      callback: (response) => {
+        showPaymentSuccess(response, email);
+      },
+      onClose: () => {
+        alert('Payment window closed.');
+      }
+    });
+
+    handler.openIframe();
+  };
+
+  const onChange = () => {
+    setState(isValidDeviceAddress(input.value));
+  };
+
+  input.addEventListener('input', onChange);
+  input.addEventListener('blur', onChange);
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+
+    const deviceAddress = input.value.trim();
+    const email = emailInput.value.trim();
+
+    if (!isValidDeviceAddress(deviceAddress) || !email) {
+      alert('Please fill in all required fields');
+      return;
+    }
+
+    try {
+      button.disabled = true;
+      await loadPaystack();
+      await initPaystackPayment(deviceAddress, email, contractIdFromUrl);
+    } catch (error) {
+      console.error(error);
+      alert('Unable to start payment. Please try again.');
+    } finally {
+      button.disabled = false;
+    }
+  });
+
   setState(isValidDeviceAddress(input.value));
 
-  // If contract ID is in URL, fetch and display details
   if (contractIdFromUrl) {
-    fetchContractDetails(contractIdFromUrl).then(contract => {
-      if (contract && contract.payment_amount) {
-        // Format amount for display (assuming backend returns in kobo or naira)
-        const amountInNaira = contract.payment_amount / 100;
-        paymentAmountDisplay.textContent = `₦${amountInNaira.toLocaleString('en-NG', { minimumFractionDigits: 2 })}`;
+    fetchContractDetails(contractIdFromUrl).then(async (contract) => {
+      contractDetails = contract;
+
+      if (contract?.payment_amount) {
+        const config = await getAppConfig();
+        const amount = Number(contract.payment_amount);
+        paymentAmountDisplay.textContent = `${config.paymentCurrency || 'GHS'} ${amount.toLocaleString('en-GH', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2
+        })}`;
       }
     });
   }
 })();
-
-
